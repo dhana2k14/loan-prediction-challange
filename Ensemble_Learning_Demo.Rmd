@@ -1,0 +1,292 @@
+---
+title: "Yodlee's Loan Prediction Challange using R"                    
+author: "Dhanasekaran"                                                 
+date: "May 5, 2016"
+output: word_document
+---
+
+![](C:\Users\33093\Desktop\Logo.png)
+
+# **Objective**:
+
+The challange is to model loan applications and predict whether they will turn bad or not.
+
+In the dataset, the first row contains the labels of the attributes. In the training dataset, there is an additional final column (named as _Loan Status_) which has the information on whether the loans will turn bad (0) or not (1).
+
+Our task here is to split the given training dataset into train and test (i.e., hold-out sample) samples and build predictive models on the training sample using various algorithms including ensemble methods and test each of the models result against the test sample. Since the test sample is also drawn from the training dataset and also contains the response variable (Loan Status), we just make use of it to cross-validate our model accuracy.  
+
+Labels of attributes is shown below. 
+
+**Variables**                         
+
+Loan Application Number           | Dept to Income Ratio (a ratio calculated based on                                            | borrower's monthly dept repayments to self reported monthly                                   | income)
+Loan Amount                       | Borrower delinquency in last two years
+Loan duration                     | Date of borrower's first loan
+Interest rate                     | Number of months since the borrower's last delinquency
+EMI                               | The number of months since the borrower's credit record was                                   | updated
+Borrower rating by bank           | Number of times borrower has availed the loan from bank
+Borrower's duration of employment | Number of negative comments about the borrower in credit                                     | history
+Home ownership of borrower        | Total credit revolving balance
+Annual income of borrower         | Percentage of credit the borrower is using relative to all                                   | available revolving credit
+Borrower's verification status    | Number of times the borrower has availed loan from all                                       | banks
+Loan issue date                   | Late fees received to date
+Purpose of loan                   | Last month payment was received
+State                             | Loan amount received as payment
+**Loan Status**                   |
+
+
+## Setting up the working directory in R 
+
+Load required R packages for this exercise 
+
+```{r, message = FALSE, warning = FALSE}
+
+setwd("D:\\Kaggle\\Yodlee")
+
+library(tree)
+library(dplyr)
+library(adabag)
+library(glm2)
+
+```
+
+Read the dataset into R data frame object
+
+```{r, message = FALSE, warning = FALSE}
+
+loan_data <- read.csv("Training.csv", sep = ",", header  = T, stringsAsFactors = FALSE)
+
+```
+
+We will just view top 5 rows of the data frame as below.
+
+```{r, message=FALSE, warning=FALSE}
+
+head(loan_data, row.names = FALSE, 5)
+
+```
+
+Since we have '%' and 'months' attached with the values in EMI column and Loan Duration column and to convert them into factor variables, we will remove '%' and 'months' from the respective columns. '%>%' is an operator used within _dplyr_ package.
+
+```{r, message = FALSE, warning = FALSE}
+
+loan_data <- loan_data %>%
+  mutate(Loan_Duration = as.integer(sub('months', '', Loan_Duration)),
+         Interest_Rate = round(as.integer(sub('%', '', Interest_Rate))*100, 2),
+         Bank_Rating = as.factor(Bank_Rating), 
+         Employment = as.factor(Employment),
+         Home_Ownership = as.factor(Home_Ownership),
+         Verification_Status = as.factor(Verification_Status),
+         Loan_Purpose = as.factor(Loan_Purpose),
+         State = as.factor(State),
+         Loan_Status = as.factor(Loan_Status)) 
+```
+
+# Feature Engineering 
+
+We cannot use _State_ as one the predictors in our model due to the fact that it has more than 32 factors hence it is decided to compute the frequency of loan applications per State and use it as one of the predictors. Likewise the frequency of loans are computed by bank rating and used. This task is generaly known as **Feature Engineering** which helps to improve the prediction accuracy of the model.   
+
+```{r, message = FALSE, warning = FALSE}
+
+l1 <- loan_data %>%
+  group_by(State) %>% 
+  summarise(loans_by_state = n())
+
+l2 <- loan_data %>%
+  group_by(Bank_Rating) %>%
+  summarise(loans_by_Rating = n())
+  
+loan_data <- loan_data %>%
+  left_join(l1, by = 'State') %>%
+  left_join(l2, by = 'Bank_Rating')
+
+```
+
+# Missing values replacement 
+
+Missing values are found in the following columns and removed using repective average.
+
+  + No_of_Loans (Number of times the borrower has availed the loan from the bank)
+  + Credit_Balance (Total Credit Revolving balance)
+  + Percentage_Used_Credit (Percentage of Credit the Borrower is Using Relative to All 
+                            Available Revolving Credit)
+  + No_of_Loans_Other_Banks (Number of Times the Borrower has Availed Loan from All Banks)
+
+```{r, message = FALSE, warning = FALSE}
+
+loan_data <- loan_data %>%
+  mutate(loan_to_income = round(Loan_Amount/Annual_Income, 2),
+         No_of_Loans = ifelse(is.na(No_of_Loans), mean(No_of_Loans, na.rm = TRUE),
+         No_of_Loans),
+         Credit_Balance = ifelse(is.na(Credit_Balance), mean(Credit_Balance, na.rm = TRUE),
+         Credit_Balance),
+         Percentage_Used_Credit = ifelse(is.na(Percentage_Used_Credit),
+         mean(Percentage_Used_Credit, na.rm = TRUE), Percentage_Used_Credit),
+         No_of_Loans_Other_banks = ifelse(is.na(No_of_Loans_Other_banks),
+         mean(No_of_Loans_Other_banks, na.rm = TRUE), No_of_Loans_Other_banks))
+
+```
+
+Exclude the identity variable _Loan No_ (Loan Application Number) and other columns with date stamp.
+
+```{r, message = FALSE, warning = FALSE}
+
+loan_data <- loan_data[,-c(1, 2, 6, 9, 11, 13, 16, 17, 18, 25)]
+
+```
+
+# Cross validation samples 
+
+Here we split the data set into two portions as required (70% - Train; 30% - Test)
+
+```{r, message = FALSE, warning = FALSE}
+
+set.seed(2)
+sam.size <- floor(.7*nrow(loan_data))
+train_ind <- sample(seq_len(nrow(loan_data)), size = sam.size)
+loan_train <- loan_data[train_ind,]
+loan_test <- loan_data[-train_ind,]
+
+loan_Status_test <- loan_test[,17] 
+loan_test <- loan_test[,-17]
+
+```
+
+# Logistic Regression Model 
+
+Initially two GLM models were studied and based on the results obtained, GLM3 (glm.fit3) is fit and finalised. Parameters with _P_ values less than 0.05 were removed in steps and arrived to the final model.
+
+```{r, message = FALSE, warning = FALSE}
+
+set.seed(123)
+glm.fit1 <- glm(Loan_Status ~ EMI + Verification_Status + Negative_Comments + No_of_Loans_Other_banks + Late_Fees + Last_Amount +
+               loans_by_state + loan_to_income, data = loan_train, family = binomial)
+summary(glm.fit1)
+
+glm.fit2 <- glm(Loan_Status ~ EMI +  Late_Fees + Last_Amount +
+                  loans_by_state + loan_to_income, data = loan_train, family = binomial)
+summary(glm.fit2)
+
+glm.fit3 <- glm(Loan_Status ~ EMI +  Late_Fees + Last_Amount +
+                  loans_by_state, data = loan_train, family = binomial)
+summary(glm.fit3)
+
+```
+
+GLM model was then fit for test observations. _predict_ is a R function used to apply the model fit object on to the new dataset and the obtained probabilties were recoded into class labels.
+
+```{r, message = FALSE, warning = FALSE}
+
+glm.probs <- predict(glm.fit3, newdata = loan_test, type = 'response')
+glm.pred <- ifelse(glm.probs>0.5, 1, 0)
+
+```
+
+# Confusion matrix - Logistic Regression
+
+_Confusion matrix_ is generally the measure to validate the classification results obtained from the model. We calculate the proportion of observations which have the predicted class as same as the observed class using _mean_ function which provides us with the model accuracy.
+
+```{r, message = FALSE, warning = FALSE}
+
+table(glm.pred, loan_Status_test)
+mean(glm.pred == loan_Status_test)
+mean(glm.pred != loan_Status_test)
+```
+
+# Decision Tree Model 
+
+Decision tree model is built using tree package in R.
+
+```{r, message = FALSE, warning = FALSE}
+set.seed(123)
+train.tree <- tree(Loan_Status ~., data = loan_train)
+summary(train.tree)
+```
+
+Decision Tree Plot 
+
+```{r, message = FALSE, warning = FALSE, fit.width = 7, fit.height = 7}
+
+plot(train.tree);text(train.tree, pretty = 0)
+
+```
+
+Decision tree model is then fit fot test observations and computed Confusion matrix.
+
+```{r, message = FALSE, warning = FALSE}
+
+tree.pred <- predict(train.tree, newdata = loan_test, type = 'class')
+table(tree.pred,loan_Status_test)
+mean(tree.pred == loan_Status_test)
+
+```
+
+# Tree Pruning using Cross Validation method
+
+Prune the tree to select number of trees to end up with.
+
+```{r,message = FALSE, warning = FALSE}
+set.seed(123)
+cv.trees = cv.tree(train.tree, FUN = prune.misclass)
+plot(cv.trees)
+
+```
+
+## Application of pruned tree
+
+The number of trees is found through pruning method and applied. O
+
+```{r, message = FALSE, warning = FALSE}
+set.seed(123)
+prune.tree <- prune.misclass(train.tree, best = 4)
+plot(prune.tree);text(prune.tree, pretty =0)
+
+```
+
+# Confusion Matrix - Decision Tree method
+
+```{r, message = FALSE, warning = FALSE}
+
+tree.pred <- predict(prune.tree, newdata = loan_test, type = 'class')
+table(tree.pred, loan_Status_test)
+mean(tree.pred == loan_Status_test)
+mean(tree.pred != loan_Status_test)
+
+```       
+  
+# ADABOOST.M1 Algorithm
+
+```{r, message = FALSE, warning = FALSE}
+
+set.seed(123)
+adaboost.model <- boosting(Loan_Status ~., data = loan_train, boos = TRUE, coeflearn = 'Breiman')
+
+# adaboost.model$terms
+# adaboost.model$weights
+# adaboost.model$trees
+
+```
+
+Predict the boosting model on test observations and test errors are evaluated.
+
+```{r, message = FALSE, warning = FALSE}
+
+boost.pred <- predict.boosting(adaboost.model, newdata = loan_test)
+predClass <- boost.pred$class
+
+````
+
+## Confusion matrix - **Adapative Boosting Technique**
+
+```{r, message= FALSE, warning= FALSE}
+
+table(predClass, loan_Status_test)
+mean(predClass == loan_Status_test)
+mean(predClass != loan_Status_test)
+
+````
+
+# Conclusion
+
+In this paper, the R package _adabag_ that implements the boosting algorithm is discussed and the error rate has substancially decreased from GLM model to AdaBoost model however the error rate acheived by using simple decision tree model is also similar as that of the adaboost model. And the overall accuracy has improved from 84% to 89%, which is beneficial. Therefore, boosting algorithm performs remarkably well over the other methods and this model can be further improved with the help of additional feature engineering of predictors.
+
